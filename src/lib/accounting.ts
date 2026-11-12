@@ -18,6 +18,7 @@ export const CUENTAS = {
   PROVEEDORES: "2101",
   IVA_DF: "2102",
   CAPITAL: "3101",
+  COSTO_VENTAS: "4101",
   VENTAS: "5101",
 } as const;
 
@@ -63,13 +64,22 @@ export function calcSale(tipoDoc: TipoDoc, monto: number, exenta = 0): SaleCalc 
   return { exenta: 0, neto, iva: r2(total - neto), total };
 }
 
-export function buildSaleLines(condicion: Condicion, c: SaleCalc): JournalLine[] {
+/**
+ * Partida de venta en sistema de inventario perpetuo:
+ *   Bancos/Clientes (Debe) a Ventas + IVA Débito (Haber)   -> reconocimiento del ingreso
+ *   Costo de Ventas (Debe) a Inventario (Haber)             -> salida al costo promedio
+ */
+export function buildSaleLines(condicion: Condicion, c: SaleCalc, costoVenta = 0): JournalLine[] {
   const cobro = condicion === "Contado" ? CUENTAS.BANCOS : CUENTAS.CLIENTES;
   const lines: JournalLine[] = [
     { cuenta: cobro, debe: c.total, haber: 0 },
     { cuenta: CUENTAS.VENTAS, debe: 0, haber: r2(c.neto + c.exenta) },
   ];
   if (c.iva > 0) lines.push({ cuenta: CUENTAS.IVA_DF, debe: 0, haber: c.iva });
+  if (costoVenta > 0) {
+    lines.push({ cuenta: CUENTAS.COSTO_VENTAS, debe: r2(costoVenta), haber: 0 });
+    lines.push({ cuenta: CUENTAS.INVENTARIO, debe: 0, haber: r2(costoVenta) });
+  }
   return lines;
 }
 

@@ -1,10 +1,11 @@
 "use client";
 
-import { Plus, Search, Trash2, TrendingUp } from "lucide-react";
+import { Plus, Search, Trash2, TrendingUp, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Alert, Badge, Modal, MonthFilter, PageHeader } from "@/components/ui";
 import { buildSaleLines, calcSale, r2 } from "@/lib/accounting";
 import { fmtDate, money, monthOf, parseAmount, todayISO } from "@/lib/format";
+import { computeKardex, costOfIssue } from "@/lib/inventory";
 import { useStore } from "@/lib/store";
 import type { Condicion, Sale, TipoDoc } from "@/lib/types";
 
@@ -15,9 +16,11 @@ interface Form {
   cliente: string;
   registro: string;
   condicion: Condicion;
-  monto: string;
+  items: { productoId: string; cantidad: string; precio: string }[];
   exenta: string;
 }
+
+const emptyItem = () => ({ productoId: "", cantidad: "", precio: "" });
 
 const emptyForm = (): Form => ({
   fecha: todayISO(),
@@ -26,12 +29,13 @@ const emptyForm = (): Form => ({
   cliente: "",
   registro: "",
   condicion: "Contado",
-  monto: "",
+  items: [emptyItem()],
   exenta: "",
 });
 
 export default function VentasPage() {
   const { data, addSale, deleteSale } = useStore();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [month, setMonth] = useState("");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -63,16 +67,42 @@ export default function VentasPage() {
       neto: r2(rows.reduce((a, x) => a + x.neto, 0)),
       iva: r2(rows.reduce((a, x) => a + x.iva, 0)),
       total: r2(rows.reduce((a, x) => a + x.total, 0)),
+      costo: r2(rows.reduce((a, x) => a + (x.costoVenta ?? 0), 0)),
     }),
     [rows]
   );
 
+  const kardex = useMemo(
+    () => new Map(data.products.map((p) => [p.id, computeKardex(p, data.movements)])),
+    [data.products, data.movements]
+  );
+  const products = useMemo(
+    () => [...data.products].sort((a, b) => a.codigo.localeCompare(b.codigo)),
+    [data.products]
+  );
+  const prodLabel = (id: string) => {
+    const p = data.products.find((x) => x.id === id);
+    return p ? `${p.codigo} · ${p.nombre}` : "—";
+  };
+
   const preview = useMemo(() => {
-    const monto = parseAmount(form.monto);
-    if (monto <= 0) return null;
+    const items = form.items
+      .map((it) => ({ ...it, q: parseAmount(it.cantidad), pu: parseAmount(it.precio) }))
+      .filter((it) => it.productoId && it.q > 0 && it.pu > 0);
+    if (items.length === 0) return null;
+    const monto = r2(items.reduce((a, it) => a + it.q * it.pu, 0));
+    let costo = 0;
+    for (const it of items) {
+      const k = kardex.get(it.productoId);
+      if (k && it.q <= k.existencia) costo += costOfIssue(k, it.q);
+    }
+    costo = r2(costo);
     const calc = calcSale(form.tipoDoc, monto, form.tipoDoc === "CCF" ? parseAmount(form.exenta) : 0);
-    return { calc, lines: buildSaleLines(form.condicion, calc) };
-  }, [form]);
+    return { calc, costo, lines: buildSaleLines(form.condicion, calc, costo) };
+  }, [form, kardex]);
+
+  const setItem = (idx: number, patch: Partial<Form["items"][number]>) =>
+    setForm({ ...form, items: form.items.map((it, i) => (i === idx ? { ...it, ...patch } : it)) });
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -83,11 +113,17 @@ export default function VentasPage() {
       cliente: form.tipoDoc === "FAC" && !form.cliente.trim() ? "Consumidor Final" : form.cliente,
       registro: form.registro,
       condicion: form.condicion,
-      monto: parseAmount(form.monto),
+      items: form.items
+        .filter((it) => it.productoId)
+        .map((it) => ({
+          productoId: it.productoId,
+          cantidad: parseAmount(it.cantidad),
+          precioUnitario: parseAmount(it.precio),
+        })),
       exenta: form.tipoDoc === "CCF" ? parseAmount(form.exenta) : 0,
     });
     if (err) return setError(err);
-    setNotice("Venta registrada y partida generada automáticamente en el Libro Diario.");
+    setNotice("Venta registrada: partida generada en el Libro Diario y salida valuada al costo promedio en el Kardex.");
     setOpen(false);
   }
 
@@ -146,6 +182,7 @@ export default function VentasPage() {
               <th className="num">Gravadas</th>
               <th className="num">Débito Fiscal</th>
               <th className="num">Total</th>
+              <th className="num">Costo de venta</th>
               <th>Partida</th>
               <th />
             </tr>
@@ -168,12 +205,18 @@ export default function VentasPage() {
                 <td className="num">{money(s.neto)}</td>
                 <td className="num">{money(s.iva)}</td>
                 <td className="num font-semibold">{money(s.total)}</td>
+                <td
+                  className="num text-slate-600"
+                  title={(s.items ?? []).map((it) => `${prodLabel(it.productoId)}: ${it.cantidad} u · costo ${money(it.costoTotal)}`).join("\n")}
+                >
+                  {money(s.costoVenta ?? 0)}
+                </td>
                 <td className="text-center font-semibold text-steel">#{entryNum(s.asientoId) ?? "—"}</td>
                 <td>
                   <button
                     className="btn-icon hover:!text-red-600"
                     title="Eliminar venta y su partida"
-                    onClick={() => setToDelete(s)}
+                    onClick={() => { setDeleteError(null); setToDelete(s); }}
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
@@ -182,7 +225,7 @@ export default function VentasPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={13} className="py-8 text-center text-slate-400">
+                <td colSpan={14} className="py-8 text-center text-slate-400">
                   No hay ventas registradas para este filtro.
                 </td>
               </tr>
@@ -196,6 +239,7 @@ export default function VentasPage() {
                 <td className="num">{money(tot.neto)}</td>
                 <td className="num">{money(tot.iva)}</td>
                 <td className="num">{money(tot.total)}</td>
+                <td className="num">{money(tot.costo)}</td>
                 <td colSpan={2} />
               </tr>
             </tfoot>
@@ -271,25 +315,104 @@ export default function VentasPage() {
             </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="label">
-                {form.tipoDoc === "CCF" ? "Venta neta gravada (sin IVA)" : "Total facturado (IVA incluido)"}
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label className="label !mb-0">
+                Detalle de productos ·{" "}
+                {form.tipoDoc === "CCF" ? "precio unitario sin IVA" : "precio unitario con IVA incluido"}
               </label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                className="input"
-                value={form.monto}
-                onChange={(e) => setForm({ ...form, monto: e.target.value })}
-                placeholder="0.00"
-                required
-              />
+              <button
+                type="button"
+                className="btn-secondary !px-2.5 !py-1 text-xs"
+                onClick={() => setForm({ ...form, items: [...form.items, emptyItem()] })}
+              >
+                <Plus className="h-3.5 w-3.5" /> Agregar producto
+              </button>
             </div>
-            {form.tipoDoc === "CCF" && (
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-2 py-2 text-left">Producto</th>
+                    <th className="px-2 py-2 text-right">Existencia</th>
+                    <th className="px-2 py-2 text-right">Cantidad</th>
+                    <th className="px-2 py-2 text-right">Precio unit.</th>
+                    <th className="px-2 py-2 text-right">Subtotal</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {form.items.map((it, idx) => {
+                    const k = it.productoId ? kardex.get(it.productoId) : undefined;
+                    const q = parseAmount(it.cantidad);
+                    const over = !!k && q > k.existencia;
+                    return (
+                      <tr key={idx} className="border-t border-slate-100">
+                        <td className="min-w-[220px] px-2 py-1.5">
+                          <select
+                            className="input"
+                            value={it.productoId}
+                            onChange={(e) => setItem(idx, { productoId: e.target.value })}
+                          >
+                            <option value="">Seleccione…</option>
+                            {products.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.codigo} · {p.nombre}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className={`px-2 py-1.5 text-right tabular-nums ${over ? "font-semibold text-red-600" : "text-slate-500"}`}>
+                          {k ? `${k.existencia} ${k.product.unidad.toLowerCase()}` : "—"}
+                        </td>
+                        <td className="w-28 px-2 py-1.5">
+                          <input
+                            type="number"
+                            step="1"
+                            min="0"
+                            className="input text-right"
+                            value={it.cantidad}
+                            onChange={(e) => setItem(idx, { cantidad: e.target.value })}
+                          />
+                        </td>
+                        <td className="w-32 px-2 py-1.5">
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            className="input text-right"
+                            value={it.precio}
+                            onChange={(e) => setItem(idx, { precio: e.target.value })}
+                            placeholder="0.00"
+                          />
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums">
+                          {money(r2(q * parseAmount(it.precio)))}
+                        </td>
+                        <td className="px-1">
+                          {form.items.length > 1 && (
+                            <button
+                              type="button"
+                              className="btn-icon"
+                              title="Quitar producto"
+                              onClick={() => setForm({ ...form, items: form.items.filter((_, i) => i !== idx) })}
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {form.tipoDoc === "CCF" && (
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="label">Venta exenta (opcional)</label>
+                <label className="label">Venta exenta no inventariable (opcional)</label>
                 <input
                   type="number"
                   step="0.01"
@@ -300,8 +423,8 @@ export default function VentasPage() {
                   placeholder="0.00"
                 />
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
           <div className="rounded-lg border border-steel-100 bg-steel-50 p-4">
             <p className="mb-2 text-xs font-bold uppercase tracking-wide text-navy">
@@ -309,7 +432,7 @@ export default function VentasPage() {
             </p>
             {preview ? (
               <>
-                <div className="mb-3 grid grid-cols-3 gap-3 text-sm">
+                <div className="mb-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
                   <div>
                     <span className="text-xs text-slate-500">Venta neta</span>
                     <p className="font-semibold tabular-nums">{money(preview.calc.neto)}</p>
@@ -321,6 +444,10 @@ export default function VentasPage() {
                   <div>
                     <span className="text-xs text-slate-500">Total</span>
                     <p className="font-bold tabular-nums text-navy">{money(preview.calc.total)}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-500">Costo de venta (promedio)</span>
+                    <p className="font-semibold tabular-nums">{money(preview.costo)}</p>
                   </div>
                 </div>
                 <table className="w-full text-xs">
@@ -337,7 +464,7 @@ export default function VentasPage() {
                 </table>
               </>
             ) : (
-              <p className="text-sm text-slate-500">Ingrese el monto para ver el desglose del IVA y la partida.</p>
+              <p className="text-sm text-slate-500">Seleccione productos, cantidades y precios para ver el IVA, el costo de venta y la partida.</p>
             )}
           </div>
 
@@ -352,10 +479,15 @@ export default function VentasPage() {
         </form>
       </Modal>
 
-      <Modal open={!!toDelete} onClose={() => setToDelete(null)} title="Eliminar venta">
+      <Modal open={!!toDelete} onClose={() => { setToDelete(null); setDeleteError(null); }} title="Eliminar venta">
+        {deleteError && (
+          <div className="mb-3">
+            <Alert tone="error">{deleteError}</Alert>
+          </div>
+        )}
         <p className="text-sm text-slate-700">
           ¿Eliminar {toDelete?.tipoDoc} N° <strong>{toDelete?.numeroDoc}</strong> de{" "}
-          <strong>{toDelete?.cliente}</strong>? También se eliminará su partida en el Libro Diario.
+          <strong>{toDelete?.cliente}</strong>? También se eliminarán su partida en el Libro Diario y sus salidas en el Kardex.
         </p>
         <div className="mt-5 flex justify-end gap-2">
           <button className="btn-secondary" onClick={() => setToDelete(null)}>
@@ -364,8 +496,10 @@ export default function VentasPage() {
           <button
             className="btn-danger"
             onClick={() => {
-              if (toDelete) deleteSale(toDelete.id);
-              setNotice("Venta y partida asociada eliminadas.");
+              if (!toDelete) return;
+              const err = deleteSale(toDelete.id);
+              if (err) return setDeleteError(err);
+              setNotice("Venta, partida asociada y salidas del Kardex eliminadas.");
               setToDelete(null);
             }}
           >

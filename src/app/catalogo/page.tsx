@@ -29,6 +29,7 @@ export default function CatalogoPage() {
   const [form, setForm] = useState<Form>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const [toDelete, setToDelete] = useState<Account | null>(null);
 
   const rows = useMemo(() => {
@@ -63,6 +64,7 @@ export default function CatalogoPage() {
     e.preventDefault();
     const err = editing ? updateAccount(editing.id, form) : addAccount(form);
     if (err) return setError(err);
+    setListError(null);
     setNotice(editing ? "Cuenta actualizada correctamente." : "Cuenta creada correctamente.");
     setOpen(false);
   }
@@ -71,7 +73,8 @@ export default function CatalogoPage() {
     if (!toDelete) return;
     const err = deleteAccount(toDelete.id);
     setNotice(null);
-    if (err) setError(err);
+    setListError(null);
+    if (err) setListError(err);
     else setNotice(`Cuenta ${toDelete.codigo} eliminada.`);
     setToDelete(null);
   }
@@ -92,6 +95,11 @@ export default function CatalogoPage() {
       {notice && (
         <div className="mb-4">
           <Alert tone="success">{notice}</Alert>
+        </div>
+      )}
+      {listError && (
+        <div className="mb-4">
+          <Alert tone="error">{listError}</Alert>
         </div>
       )}
       {error && !open && (

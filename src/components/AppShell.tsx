@@ -3,6 +3,7 @@
 import {
   BookMarked,
   BookOpen,
+  Boxes,
   Cloud,
   HardDrive,
   LayoutDashboard,
@@ -27,6 +28,7 @@ const NAV = [
   { href: "/compras", label: "3. Libro de Compras", icon: ShoppingCart },
   { href: "/diario", label: "4. Libro Diario", icon: BookOpen },
   { href: "/mayor", label: "5. Libro Diario Mayor", icon: BookMarked },
+  { href: "/inventario", label: "6. Inventario (Kardex)", icon: Boxes },
 ];
 
 const SYNC_LABEL: Record<SyncStatus, { text: string; icon: typeof Cloud }> = {

@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
+import { Plus, Search, ShoppingCart, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Alert, Badge, Modal, MonthFilter, PageHeader } from "@/components/ui";
 import { buildPurchaseLines, calcPurchase, CUENTAS, r2 } from "@/lib/accounting";
@@ -17,7 +17,10 @@ interface Form {
   concepto: string;
   cuentaDestino: string;
   neto: string;
+  items: { productoId: string; cantidad: string; costo: string }[];
 }
+
+const emptyItem = () => ({ productoId: "", cantidad: "", costo: "" });
 
 const emptyForm = (): Form => ({
   fecha: todayISO(),
@@ -28,10 +31,12 @@ const emptyForm = (): Form => ({
   concepto: "",
   cuentaDestino: CUENTAS.INVENTARIO,
   neto: "",
+  items: [emptyItem()],
 });
 
 export default function ComprasPage() {
   const { data, addPurchase, deletePurchase } = useStore();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [month, setMonth] = useState("");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -39,6 +44,13 @@ export default function ComprasPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [toDelete, setToDelete] = useState<Purchase | null>(null);
+  const toInventory = form.cuentaDestino === CUENTAS.INVENTARIO;
+  const products = useMemo(
+    () => [...data.products].sort((a, b) => a.codigo.localeCompare(b.codigo)),
+    [data.products]
+  );
+  const setItem = (idx: number, patch: Partial<Form["items"][number]>) =>
+    setForm({ ...form, items: form.items.map((it, i) => (i === idx ? { ...it, ...patch } : it)) });
 
   const nameOf = (code: string) => data.accounts.find((a) => a.codigo === code)?.nombre ?? "";
   const entryNum = (id: string) => data.entries.find((e) => e.id === id)?.numero;
@@ -83,7 +95,10 @@ export default function ComprasPage() {
   );
 
   const preview = useMemo(() => {
-    const neto = parseAmount(form.neto);
+    const neto =
+      form.cuentaDestino === CUENTAS.INVENTARIO
+        ? r2(form.items.reduce((a, it) => a + r2(parseAmount(it.cantidad) * parseAmount(it.costo)), 0))
+        : parseAmount(form.neto);
     if (neto <= 0) return null;
     const calc = calcPurchase(neto);
     return { calc, lines: buildPurchaseLines(form.condicion, form.cuentaDestino, calc) };
@@ -100,9 +115,20 @@ export default function ComprasPage() {
       concepto: form.concepto,
       cuentaDestino: form.cuentaDestino,
       neto: parseAmount(form.neto),
+      items: form.items
+        .filter((it) => it.productoId)
+        .map((it) => ({
+          productoId: it.productoId,
+          cantidad: parseAmount(it.cantidad),
+          costoUnitario: parseAmount(it.costo),
+        })),
     });
     if (err) return setError(err);
-    setNotice("Compra registrada y asiento generado automáticamente en el Libro Diario.");
+    setNotice(
+      toInventory
+        ? "Compra registrada: asiento generado en el Libro Diario y entradas cargadas al Kardex (costo promedio recalculado)."
+        : "Compra registrada y asiento generado automáticamente en el Libro Diario."
+    );
     setOpen(false);
   }
 
@@ -184,7 +210,7 @@ export default function ComprasPage() {
                   <button
                     className="btn-icon hover:!text-red-600"
                     title="Eliminar compra y su partida"
-                    onClick={() => setToDelete(p)}
+                    onClick={() => { setDeleteError(null); setToDelete(p); }}
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
@@ -271,8 +297,22 @@ export default function ComprasPage() {
             </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="sm:col-span-2">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="label">Cuenta a cargar (destino de la compra)</label>
+              <select
+                className="input"
+                value={form.cuentaDestino}
+                onChange={(e) => setForm({ ...form, cuentaDestino: e.target.value })}
+              >
+                {destinos.map((a) => (
+                  <option key={a.id} value={a.codigo}>
+                    {a.codigo} — {a.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="label">Concepto</label>
               <input
                 className="input"
@@ -281,35 +321,110 @@ export default function ComprasPage() {
                 placeholder="Ej. Compra de cemento"
               />
             </div>
-            <div>
-              <label className="label">Compra neta (sin IVA)</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                className="input"
-                value={form.neto}
-                onChange={(e) => setForm({ ...form, neto: e.target.value })}
-                placeholder="0.00"
-                required
-              />
-            </div>
           </div>
 
-          <div>
-            <label className="label">Cuenta a cargar (destino de la compra)</label>
-            <select
-              className="input"
-              value={form.cuentaDestino}
-              onChange={(e) => setForm({ ...form, cuentaDestino: e.target.value })}
-            >
-              {destinos.map((a) => (
-                <option key={a.id} value={a.codigo}>
-                  {a.codigo} — {a.nombre}
-                </option>
-              ))}
-            </select>
-          </div>
+          {toInventory ? (
+            <div>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="label !mb-0">Detalle de productos (entradas al Kardex) · costo unitario sin IVA</label>
+                <button
+                  type="button"
+                  className="btn-secondary !px-2.5 !py-1 text-xs"
+                  onClick={() => setForm({ ...form, items: [...form.items, emptyItem()] })}
+                >
+                  <Plus className="h-3.5 w-3.5" /> Agregar producto
+                </button>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-slate-200">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                    <tr>
+                      <th className="px-2 py-2 text-left">Producto</th>
+                      <th className="px-2 py-2 text-right">Cantidad</th>
+                      <th className="px-2 py-2 text-right">Costo unit.</th>
+                      <th className="px-2 py-2 text-right">Subtotal</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {form.items.map((it, idx) => (
+                      <tr key={idx} className="border-t border-slate-100">
+                        <td className="min-w-[220px] px-2 py-1.5">
+                          <select
+                            className="input"
+                            value={it.productoId}
+                            onChange={(e) => setItem(idx, { productoId: e.target.value })}
+                          >
+                            <option value="">Seleccione…</option>
+                            {products.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.codigo} · {p.nombre}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="w-28 px-2 py-1.5">
+                          <input
+                            type="number"
+                            step="1"
+                            min="0"
+                            className="input text-right"
+                            value={it.cantidad}
+                            onChange={(e) => setItem(idx, { cantidad: e.target.value })}
+                          />
+                        </td>
+                        <td className="w-32 px-2 py-1.5">
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            className="input text-right"
+                            value={it.costo}
+                            onChange={(e) => setItem(idx, { costo: e.target.value })}
+                            placeholder="0.00"
+                          />
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums">
+                          {money(r2(parseAmount(it.cantidad) * parseAmount(it.costo)))}
+                        </td>
+                        <td className="px-1">
+                          {form.items.length > 1 && (
+                            <button
+                              type="button"
+                              className="btn-icon"
+                              title="Quitar producto"
+                              onClick={() => setForm({ ...form, items: form.items.filter((_, i) => i !== idx) })}
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {products.length === 0 && (
+                <p className="mt-2 text-xs text-amber-700">No hay productos: créelos primero en el módulo de Inventario.</p>
+              )}
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div>
+                <label className="label">Compra neta (sin IVA)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="input"
+                  value={form.neto}
+                  onChange={(e) => setForm({ ...form, neto: e.target.value })}
+                  placeholder="0.00"
+                  required
+                />
+              </div>
+            </div>
+          )}
 
           <div className="rounded-lg border border-steel-100 bg-steel-50 p-4">
             <p className="mb-2 text-xs font-bold uppercase tracking-wide text-navy">
@@ -345,7 +460,7 @@ export default function ComprasPage() {
                 </table>
               </>
             ) : (
-              <p className="text-sm text-slate-500">Ingrese el monto neto para ver el IVA y el asiento.</p>
+              <p className="text-sm text-slate-500">Ingrese el detalle de la compra para ver el IVA y el asiento.</p>
             )}
           </div>
 
@@ -360,10 +475,15 @@ export default function ComprasPage() {
         </form>
       </Modal>
 
-      <Modal open={!!toDelete} onClose={() => setToDelete(null)} title="Eliminar compra">
+      <Modal open={!!toDelete} onClose={() => { setToDelete(null); setDeleteError(null); }} title="Eliminar compra">
+        {deleteError && (
+          <div className="mb-3">
+            <Alert tone="error">{deleteError}</Alert>
+          </div>
+        )}
         <p className="text-sm text-slate-700">
           ¿Eliminar el CCF N° <strong>{toDelete?.numeroDoc}</strong> de <strong>{toDelete?.proveedor}</strong>?
-          También se eliminará su asiento en el Libro Diario.
+          También se eliminarán su asiento en el Libro Diario y, si aplica, sus entradas en el Kardex.
         </p>
         <div className="mt-5 flex justify-end gap-2">
           <button className="btn-secondary" onClick={() => setToDelete(null)}>
@@ -372,8 +492,10 @@ export default function ComprasPage() {
           <button
             className="btn-danger"
             onClick={() => {
-              if (toDelete) deletePurchase(toDelete.id);
-              setNotice("Compra y asiento asociado eliminados.");
+              if (!toDelete) return;
+              const err = deletePurchase(toDelete.id);
+              if (err) return setDeleteError(err);
+              setNotice("Compra, asiento asociado y entradas del Kardex eliminados.");
               setToDelete(null);
             }}
           >
