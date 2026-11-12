@@ -165,11 +165,25 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [sync, setSync] = useState<SyncStatus>("local");
   const dataRef = useRef<AppData>(EMPTY);
   const remoteReady = useRef(false);
+  const localMutated = useRef(false);
 
-  const commit = useCallback((next: AppData) => {
+  const applyState = useCallback((next: AppData) => {
     dataRef.current = next;
     setData(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      /* almacenamiento lleno o bloqueado */
+    }
   }, []);
+
+  const commit = useCallback(
+    (next: AppData) => {
+      localMutated.current = true;
+      applyState(next);
+    },
+    [applyState]
+  );
 
   // Carga inicial: localStorage -> (opcional) Firestore
   useEffect(() => {
@@ -184,15 +198,15 @@ export function DataProvider({ children }: { children: ReactNode }) {
       /* datos corruptos: se usan los de prueba */
     }
     const start = initial ?? seedData();
-    commit(start);
+    applyState(start);
     setReady(true);
 
     if (firebaseConfigured) {
       setSync("conectando");
       loadRemote()
         .then(async (remote) => {
-          if (remote && isValidData(remote)) {
-            commit(remote);
+          if (!localMutated.current && !initial && remote && isValidData(remote)) {
+            applyState(remote);
           } else {
             await saveRemote(dataRef.current);
           }
@@ -201,7 +215,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         })
         .catch(() => setSync("error"));
     }
-  }, [commit]);
+  }, [applyState]);
 
   // Persistencia
   useEffect(() => {
@@ -216,7 +230,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       saveRemote(data)
         .then(() => setSync("firebase"))
         .catch(() => setSync("error"));
-    }, 600);
+    }, 300);
     return () => clearTimeout(t);
   }, [data, ready]);
 

@@ -140,26 +140,57 @@ export function sortEntries(entries: JournalEntry[]): JournalEntry[] {
 
 export function computeLedger(accounts: Account[], entries: JournalEntry[]): LedgerAccount[] {
   const sorted = sortEntries(entries);
+  const byKey = new Map<string, Account>();
+  for (const a of accounts) {
+    byKey.set(a.codigo.trim(), a);
+    byKey.set(a.id, a);
+  }
+
   const map = new Map<string, LedgerMovement[]>();
   for (const e of sorted) {
     for (const l of e.lineas) {
-      const arr = map.get(l.cuenta) ?? [];
+      const raw = String(l.cuenta ?? "").trim();
+      if (!raw) continue;
+      const matched = byKey.get(raw);
+      const code = matched ? matched.codigo.trim() : raw;
+      const arr = map.get(code) ?? [];
       arr.push({
         entryId: e.id,
         numero: e.numero,
         fecha: e.fecha,
         concepto: e.concepto,
-        debe: l.debe,
-        haber: l.haber,
+        debe: Number(l.debe) || 0,
+        haber: Number(l.haber) || 0,
       });
-      map.set(l.cuenta, arr);
+      map.set(code, arr);
     }
   }
 
   const result: LedgerAccount[] = [];
-  const pool = accounts.filter((a) => a.tipo === "Detalle" || map.has(a.codigo));
+  const seenCodes = new Set<string>();
+  const pool: Account[] = [];
+  for (const a of accounts) {
+    const code = a.codigo.trim();
+    if (a.tipo === "Detalle" || map.has(code)) {
+      pool.push(a);
+      seenCodes.add(code);
+    }
+  }
+  for (const code of map.keys()) {
+    if (!seenCodes.has(code)) {
+      pool.push({
+        id: `acc-${code}`,
+        codigo: code,
+        nombre: `Cuenta ${code}`,
+        rubro: "Activo",
+        naturaleza: "Deudora",
+        tipo: "Detalle",
+      });
+    }
+  }
+
   for (const account of pool) {
-    const movimientos = map.get(account.codigo) ?? [];
+    const movimientos = map.get(account.codigo.trim()) ?? [];
     let d = 0;
     let h = 0;
     for (const m of movimientos) {
@@ -179,5 +210,7 @@ export function computeLedger(accounts: Account[], entries: JournalEntry[]): Led
       saldoAcreedor: neto < 0 ? -neto : 0,
     });
   }
-  return result.sort((a, b) => a.account.codigo.localeCompare(b.account.codigo));
+  return result.sort((a, b) =>
+    a.account.codigo.localeCompare(b.account.codigo, undefined, { numeric: true })
+  );
 }
